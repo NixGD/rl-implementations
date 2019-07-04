@@ -12,35 +12,41 @@ class VpgBuffer():
         self.actions = torch.zeros(size)
         self.log_probs = torch.zeros([size, num_actions])
         self.rewards = torch.zeros(size)
-
-        self.episode_rewards = []
+        self.future_rewards = torch.zeros(size)
 
         self.size = size
+
+        self.last_reset = 0
         self.i = 0
 
     def append(self, log_prob, action, reward):
         assert self.i < self.size, "Buffer Full!"
         self.log_probs[self.i] = log_prob
         self.actions[self.i] = action
-        self.episode_rewards.append(reward)
+        self.rewards[self.i] = reward
 
         self.i += 1
 
         return self.i == self.size
 
     def end_trajectory(self):
-        length = len(self.episode_rewards)
-        start = self.i - length
-        tot_reward = sum(self.episode_rewards)
+        traj_rews = self.rewards[self.last_reset:self.i]
+        cum_rews = torch.cumsum(traj_rews, dim=0)
+        total_rew = cum_rews[-1]
 
-        self.rewards[start:self.i] = tot_reward
+        # offset cum-rewards
+        offset_cum_rews = torch.zeros_like(cum_rews)
+        offset_cum_rews[1:] = cum_rews[:-1]
+        offset_cum_rews[0] = 0
 
-        self.episode_rewards = []
+        future_rews = total_rew - offset_cum_rews
+        self.future_rewards[self.last_reset:self.i] = future_rews
 
-        return tot_reward
+        self.last_reset = self.i
+        return total_rew.item()
 
     def get_data(self):
-        return self.log_probs, self.actions, self.rewards
+        return self.log_probs, self.actions, self.future_rewards
 
 
 class Mlp(nn.Module):
@@ -113,9 +119,7 @@ class Vpg():
 
             while not done and not full:
                 act, logit = self.agent.step(obs)
-
                 obs, rew, done, _ = self.env.step(act)
-
                 full = buf.append(logit, act, rew)
 
             rew = buf.end_trajectory()
@@ -127,8 +131,6 @@ class Vpg():
         self.optimizer.zero_grad()
         loss = self.loss(buf)
         loss.backward()
-
-
         self.optimizer.step()
 
 
