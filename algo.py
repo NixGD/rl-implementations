@@ -2,7 +2,45 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+from statistics import mean
+
 import gym
+
+
+class VpgBuffer():
+    def __init__(self, size, num_actions):
+        self.actions = torch.zeros(size)
+        self.log_probs = torch.zeros([size, num_actions])
+        self.rewards = torch.zeros(size)
+
+        self.episode_rewards = []
+
+        self.size = size
+        self.i = 0
+
+    def append(self, log_prob, action, reward):
+        assert self.i < self.size, "Buffer Full!"
+        self.log_probs[self.i] = log_prob
+        self.actions[self.i] = action
+        self.episode_rewards.append(reward)
+
+        self.i += 1
+
+        return self.i == self.size
+
+    def end_trajectory(self):
+        length = len(self.episode_rewards)
+        start = self.i - length
+        tot_reward = sum(self.episode_rewards)
+
+        self.rewards[start:self.i] = tot_reward
+
+        self.episode_rewards = []
+
+        return tot_reward
+
+    def get_data(self):
+        return self.log_probs, self.actions, self.rewards
 
 
 class Mlp(nn.Module):
@@ -32,7 +70,7 @@ class Mlp(nn.Module):
 class Vpg():
 
     def __init__(self, lr=1e-2):
-        self.env = gym.make('MountainCar-v0')
+        self.env = gym.make('CartPole-v0')
 
         assert isinstance(self.env.observation_space, gym.spaces.Box), \
             "A continuous state space is required"
@@ -45,53 +83,52 @@ class Vpg():
 
         self.optimizer = optim.Adam(self.agent.parameters(), lr=lr)
 
-    def loss(self, logits, acts, rews):
+    @staticmethod
+    def loss(buffer: VpgBuffer):
+        """ Given a VPG Buffer with experience data, will return a "loss"
+        fucntion which has the appropriate gradient at the current point.
         """
-        logits  log likelihoods
-                size [n, T, k] where k is number of actions
-        acts    actions      [n, T]
-        rews    rewards      [n]
-        """
-        # Create 1-hot mask in shape (n,T,k)
-        action_mask = nn.functional.one_hot(acts.long(), self.num_actions)
 
-        # TODO / IMPROVE: use future rewards, or some such.
-        # Currently using total trajectory reward, so we reduce on dim 1 too
-        logliks = torch.sum(action_mask.float() * logits, dim=[1, 2])
+        log_probs, actions, rewards = buffer.get_data()
 
-        return - torch.mean(rews * logliks)
+        # Create 1-hot mask in shape of actions (num steps, num actions)
+        num_actions = log_probs.shape[1]
+        action_mask = nn.functional.one_hot(actions.long(), num_actions)
 
-    def run_epoch(self, batch_size=100, max_steps=200):
-        logits = torch.zeros(batch_size, max_steps, self.num_actions)
+        # Use mask to find probabilities of actions taken
+        masked_probs = torch.sum(action_mask.float() * log_probs, dim=1)
 
-        # TODO: make sure this deals properly with too-short episodes.
-        acts = torch.zeros((batch_size, max_steps))
-        rews = torch.zeros(batch_size)
+        return - torch.mean(rewards * masked_probs)
 
-        for i in range(batch_size):
+    def run_epoch(self, batch_size=5000):
+
+        buf = VpgBuffer(batch_size, self.num_actions)
+
+        rews = []
+        full = False
+
+        while not full:
             obs = self.env.reset()
             done = False
 
-            cum_rew = 0
-            for step in range(max_steps):
+            while not done and not full:
                 act, logit = self.agent.step(obs)
-                acts[i, step] = act
-                logits[i, step, :] = logit
 
                 obs, rew, done, _ = self.env.step(act)
-                cum_rew += rew
 
-                if done:
-                    break
+                full = buf.append(logit, act, rew)
 
-            rews[i] = cum_rew
+            rew = buf.end_trajectory()
+            rews.append(rew)
 
-        avg_rew = torch.mean(rews)
+        avg_rew = mean(rews)
         print("Epoch avg reward: \t {}".format(avg_rew))
 
         self.optimizer.zero_grad()
-        loss = self.loss(logits, acts, rews)
+        loss = self.loss(buf)
         loss.backward()
+
+
         self.optimizer.step()
 
 
