@@ -4,6 +4,8 @@ import torch.optim as optim
 
 from statistics import mean
 
+from tensorboardX import SummaryWriter
+
 import gym
 
 
@@ -91,7 +93,7 @@ class Mlp(nn.Module):
 
 class Vpg():
 
-    def __init__(self, lr=1e-2, method="togo"):
+    def __init__(self, lr=1e-2, method="value baseline", writer=None):
         self.env = gym.make('CartPole-v0')
 
         assert isinstance(self.env.observation_space, gym.spaces.Box), \
@@ -99,7 +101,7 @@ class Vpg():
         assert isinstance(self.env.action_space, gym.spaces.Discrete), \
             "A discrete action space is required"
 
-        assert method in ["episode", "togo", "value baseline"]
+        assert method in ["trajectory", "togo", "value baseline"]
 
         self.num_actions = self.env.action_space.n
         self.obs_dim = self.env.observation_space.shape[0]
@@ -111,6 +113,8 @@ class Vpg():
         if self.method == "value baseline":
             self.value_estimator = Mlp(self.obs_dim, 1)
             self.value_opt = optim.Adam(self.value_estimator.parameters(), lr=lr)
+
+        self.writer = writer if writer is not None else SummaryWriter()
 
     def actor_loss(self, buffer: VpgBuffer):
         """ Given a VPG Buffer with experience data, will return a "loss"
@@ -135,7 +139,7 @@ class Vpg():
 
         return - torch.mean(weights * masked_probs)
 
-    def run_epoch(self, batch_size=5000):
+    def run_epoch(self, epoch_num, batch_size=5000):
 
         buf = VpgBuffer(batch_size, self.obs_dim, self.num_actions)
 
@@ -155,7 +159,10 @@ class Vpg():
             rews.append(rew)
 
         avg_rew = mean(rews)
-        print("Epoch avg reward: \t {}".format(avg_rew))
+
+        self.writer.add_scalar("Average reward", avg_rew, epoch_num)
+        if not epoch_num % 5:
+            print(f"Epoch {epoch_num} avg reward: \t {avg_rew}")
 
         self.actor_opt.zero_grad()
         loss = self.actor_loss(buf)
@@ -168,9 +175,21 @@ class Vpg():
         value_loss(estimates, togo_rewards).backward(retain_graph=True)
         self.value_opt.step()
 
+    def run(self, epocs):
+        for i in range(50):
+            self.run_epoch(i)
+
 
 if __name__ == '__main__':
-    vpg = Vpg(method="value baseline")
 
-    for i in range(50):
-        vpg.run_epoch()
+    with SummaryWriter(comment="tj") as wr:
+        Vpg(method="trajectory",
+            writer=wr).run(50)
+
+    with SummaryWriter(comment="tg") as wr:
+        Vpg(method="togo",
+            writer=wr).run(50)
+
+    with SummaryWriter(comment="vb") as wr:
+        Vpg(method="value baseline",
+            writer=wr).run(50)
