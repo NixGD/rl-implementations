@@ -8,22 +8,28 @@ import gym
 
 
 class VpgBuffer():
-    def __init__(self, size, num_actions):
+    def __init__(self, size, num_observations, num_actions):
+        self.observations = torch.zeros([size, num_observations])
         self.actions = torch.zeros(size)
+        # hmm... only store used log-prob?
         self.log_probs = torch.zeros([size, num_actions])
+
         self.rewards = torch.zeros(size)
-        self.future_rewards = torch.zeros(size)
+        self.traj_rewards = torch.zeros(size)
+        self.togo_rewards = torch.zeros(size)
 
         self.size = size
 
         self.last_reset = 0
         self.i = 0
 
-    def append(self, log_prob, action, reward):
+    def append(self, logprob, obs, act, rew):
         assert self.i < self.size, "Buffer Full!"
-        self.log_probs[self.i] = log_prob
-        self.actions[self.i] = action
-        self.rewards[self.i] = reward
+        self.log_probs[self.i] = logprob
+        self.observations[self.i, :] = torch.Tensor(obs)
+        # print(torch.Tensor(obs))
+        self.actions[self.i] = act
+        self.rewards[self.i] = rew
 
         self.i += 1
 
@@ -31,6 +37,8 @@ class VpgBuffer():
 
     def end_trajectory(self):
         traj_rews = self.rewards[self.last_reset:self.i]
+
+        # Future rewards
         cum_rews = torch.cumsum(traj_rews, dim=0)
         total_rew = cum_rews[-1]
 
@@ -39,14 +47,23 @@ class VpgBuffer():
         offset_cum_rews[1:] = cum_rews[:-1]
         offset_cum_rews[0] = 0
 
-        future_rews = total_rew - offset_cum_rews
-        self.future_rewards[self.last_reset:self.i] = future_rews
+        togo_rews = total_rew - offset_cum_rews
+        self.togo_rewards[self.last_reset:self.i] = togo_rews
+
+        # Total rewards
+        self.traj_rewards[self.last_reset:self.i] = total_rew
 
         self.last_reset = self.i
         return total_rew.item()
 
     def get_data(self):
-        return self.log_probs, self.actions, self.future_rewards
+        return {
+            "log_probs": self.log_probs,
+            "actions": self.actions,
+            "togo_rewards": self.togo_rewards,
+            "traj_rewards": self.traj_rewards,
+            "observations": self.observations,
+        }
 
 
 class Mlp(nn.Module):
@@ -63,19 +80,18 @@ class Mlp(nn.Module):
         out = self.fc1(x)
         out = self.tanh(out)
         out = self.fc2(out)
-        out = self.sm(out)
-        return out
+        return out.squeeze()
 
-    def step(self, obs):
+    def generate_action(self, obs):
         obs = torch.tensor(obs, dtype=torch.float)
-        logit = self.forward(obs)
+        logit = self.sm(self.forward(obs))
         action = torch.multinomial(torch.exp(logit), 1).item()
         return action, logit
 
 
 class Vpg():
 
-    def __init__(self, lr=1e-2):
+    def __init__(self, lr=1e-2, method="togo"):
         self.env = gym.make('CartPole-v0')
 
         assert isinstance(self.env.observation_space, gym.spaces.Box), \
@@ -83,32 +99,45 @@ class Vpg():
         assert isinstance(self.env.action_space, gym.spaces.Discrete), \
             "A discrete action space is required"
 
+        assert method in ["episode", "togo", "value baseline"]
+
         self.num_actions = self.env.action_space.n
         self.obs_dim = self.env.observation_space.shape[0]
+
         self.agent = Mlp(self.obs_dim, self.num_actions)
+        self.actor_opt = optim.Adam(self.agent.parameters(), lr=lr)
 
-        self.optimizer = optim.Adam(self.agent.parameters(), lr=lr)
+        self.method = method
+        if self.method == "value baseline":
+            self.value_estimator = Mlp(self.obs_dim, 1)
+            self.value_opt = optim.Adam(self.value_estimator.parameters(), lr=lr)
 
-    @staticmethod
-    def loss(buffer: VpgBuffer):
+    def actor_loss(self, buffer: VpgBuffer):
         """ Given a VPG Buffer with experience data, will return a "loss"
         fucntion which has the appropriate gradient at the current point.
         """
 
-        log_probs, actions, rewards = buffer.get_data()
+        d = buffer.get_data()
+        weights = d["traj_rewards"]
+        if self.method == "togo":
+            weights = d["togo_rewards"]
+        if self.method == "value baseline":
+            value_est = self.value_estimator.forward(d["observations"])
+            weights = d["togo_rewards"] - value_est
+
+            self.update_value_estimator(value_est, d["togo_rewards"])
 
         # Create 1-hot mask in shape of actions (num steps, num actions)
-        num_actions = log_probs.shape[1]
-        action_mask = nn.functional.one_hot(actions.long(), num_actions)
+        action_mask = nn.functional.one_hot(d["actions"].long(), self.num_actions)
 
         # Use mask to find probabilities of actions taken
-        masked_probs = torch.sum(action_mask.float() * log_probs, dim=1)
+        masked_probs = torch.sum(action_mask.float() * d["log_probs"], dim=1)
 
-        return - torch.mean(rewards * masked_probs)
+        return - torch.mean(weights * masked_probs)
 
     def run_epoch(self, batch_size=5000):
 
-        buf = VpgBuffer(batch_size, self.num_actions)
+        buf = VpgBuffer(batch_size, self.obs_dim, self.num_actions)
 
         rews = []
         full = False
@@ -118,9 +147,9 @@ class Vpg():
             done = False
 
             while not done and not full:
-                act, logit = self.agent.step(obs)
+                act, logit = self.agent.generate_action(obs)
                 obs, rew, done, _ = self.env.step(act)
-                full = buf.append(logit, act, rew)
+                full = buf.append(logprob=logit, obs=obs, act=act, rew=rew)
 
             rew = buf.end_trajectory()
             rews.append(rew)
@@ -128,14 +157,20 @@ class Vpg():
         avg_rew = mean(rews)
         print("Epoch avg reward: \t {}".format(avg_rew))
 
-        self.optimizer.zero_grad()
-        loss = self.loss(buf)
+        self.actor_opt.zero_grad()
+        loss = self.actor_loss(buf)
         loss.backward()
-        self.optimizer.step()
+        self.actor_opt.step()
+
+    def update_value_estimator(self, estimates, togo_rewards):
+        self.value_opt.zero_grad()
+        value_loss = nn.MSELoss()
+        value_loss(estimates, togo_rewards).backward(retain_graph=True)
+        self.value_opt.step()
 
 
 if __name__ == '__main__':
-    vpg = Vpg()
+    vpg = Vpg(method="value baseline")
 
     for i in range(50):
         vpg.run_epoch()
