@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 
 from statistics import mean
@@ -112,7 +113,8 @@ class Vpg():
         self.method = method
         if self.method == "value baseline":
             self.value_estimator = Mlp(self.obs_dim, 1)
-            self.value_opt = optim.Adam(self.value_estimator.parameters(), lr=lr)
+            self.value_opt = optim.Adam(
+                self.value_estimator.parameters(), lr=lr)
 
         self.writer = writer if writer is not None else SummaryWriter()
 
@@ -132,7 +134,7 @@ class Vpg():
             self.update_value_estimator(value_est, d["togo_rewards"])
 
         # Create 1-hot mask in shape of actions (num steps, num actions)
-        action_mask = nn.functional.one_hot(d["actions"].long(), self.num_actions)
+        action_mask = F.one_hot(d["actions"].long(), self.num_actions)
 
         # Use mask to find probabilities of actions taken
         masked_probs = torch.sum(action_mask.float() * d["log_probs"], dim=1)
