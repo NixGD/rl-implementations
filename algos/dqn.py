@@ -1,20 +1,28 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 import torch.optim as optim
 
 import numpy as np
 import random
+
 import gym
+from baselines.common.atari_wrappers import wrap_deepmind
+
+from tensorboardX import SummaryWriter
+
+from tqdm import tqdm
+
+from statistics import mean
+from datetime import datetime
 
 
 class ExperienceBuffer():
     def __init__(self, size, state_size):
-        self.init_states = torch.zeros([size, state_size])
+        self.init_states = torch.zeros([size] + state_size)
         self.actions = torch.zeros(size, dtype=torch.long)
         self.rewards = torch.zeros(size)
-        self.next_states = torch.zeros([size, state_size])
+        self.next_states = torch.zeros([size] + state_size)
         self.non_terminal = torch.zeros(size)
 
         self.size = size
@@ -37,6 +45,7 @@ class ExperienceBuffer():
             self.i = 0
 
     def sample(self, size):
+
         indexes = np.arange(self.size) if self.full else np.arange(self.i)
         size = min(size, len(indexes))
 
@@ -74,25 +83,25 @@ class QNetworkAtari(nn.Module):
         self.conv1 = nn.Conv2d(
             in_channels=4,
             out_channels=16,
-            kernal_size=8,
-            stride=4),
+            kernel_size=8,
+            stride=4)
         self.conv2 = nn.Conv2d(
             in_channels=16,
             out_channels=32,
-            kernal_size=4,
-            stride=2),
+            kernel_size=4,
+            stride=2)
         self.relu = nn.ReLU()
         self.fc1 = nn.Linear(9*9*32, 256)
         self.fc2 = nn.Linear(256, num_actions)
 
     def forward(self, x):
         x = torch.tensor(x)
-        x = x.permute(0, 3, 1, 2)
+        x = x.reshape(-1, 84, 84, 4).permute(0, 3, 1, 2)
         x = x.float() / 256
 
         x = F.relu(self.conv1(x))
         x = F.relu(self.conv2(x))
-        x = torch.flatten(x)
+        x = torch.flatten(x, 1)
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
 
@@ -102,17 +111,21 @@ class QNetworkAtari(nn.Module):
 class DQN():
 
     def __init__(self, env=None, atari=False, gamma=.99,
-                 epoch_steps=10**4, writer=None):
+                 epoch_steps=10**3, writer=None, buffer_size=2000):
 
         self.env = gym.make('CartPole-v0') if env is None else env
         self.num_actions = self.env.action_space.n
         self.obs_dim = self.env.observation_space.shape[0]
 
-        self.exp_buf = ExperienceBuffer(2000, self.obs_dim)
         if atari:
+            print("using atari")
             self.qnet = QNetworkAtari(self.num_actions)
+            self.obs_dim = [84, 84, 4]
+
         else:
-            self. qnet = QNetwork(self.obs_dim, self.num_actions)
+            self.qnet = QNetwork(self.obs_dim, self.num_actions)
+
+        self.exp_buf = ExperienceBuffer(buffer_size, self.obs_dim)
 
         self.qnet_opt = optim.Adam(self.qnet.parameters())
 
@@ -132,7 +145,7 @@ class DQN():
             return torch.argmax(qvals).item()
 
     def qnet_loss(self):
-        d = self.exp_buf.sample(10)
+        d = self.exp_buf.sample(100)
 
         nextqs = self.qnet.forward(d["next_states"])
         maxq, _ = torch.max(nextqs, dim=1)
@@ -145,29 +158,69 @@ class DQN():
         mse = nn.MSELoss()
         return mse(qs, ys)
 
-    def train(self):
-        i = 0
-        while i < self.training_steps:
-            obs = torch.tensor(self.env.reset(), dtype=torch.float)
+    def evaluate(self, times=20, epsilon=0.05, render=True):
+        rews = []
+        for i in tqdm(range(times)):
+            obs = self.env.reset()
             done = False
+            tot_rew = 0
+            if render and not i:
+                self.env.render()
 
             while not done:
-                init_obs = obs
+                obs = torch.tensor(obs, dtype=torch.float)
                 act = self.choose_action(obs, 0.05)
                 obs, rew, done, _ = self.env.step(act)
+                tot_rew += rew
+                if render and not i:
+                    self.env.render()
 
-                obs = torch.tensor(obs, dtype=torch.float)
-                self.exp_buf.store(init_obs, act, rew, obs, done)
+            rews.append(tot_rew)
+        return mean(rews), max(rews)
 
-                self.qnet_opt.zero_grad()
-                loss = self.qnet_loss()
-                loss.backward()
-                print(f"After {i} steps, loss={loss}")
-                self.qnet_opt.step()
+    def train_epoch(self):
+        self.epoch += 1
+        i = 0
 
-                i += 1
+        with tqdm(total=self.epoch_steps) as pbar:
+            while i < self.epoch_steps:
+                obs = torch.tensor(self.env.reset(), dtype=torch.float)
+                for _ in range(6):
+                    _ = self.env.step(0)
+                done = False
+
+                while (not done) and (i < self.epoch_steps):
+                    init_obs = obs
+                    act = self.choose_action(obs, 0.05)
+                    obs, rew, done, _ = self.env.step(act)
+
+                    obs = torch.tensor(obs, dtype=torch.float)
+                    self.exp_buf.store(init_obs, act, rew, obs, done)
+
+                    self.qnet_opt.zero_grad()
+                    loss = self.qnet_loss()
+                    loss.backward()
+                    self.qnet_opt.step()
+
+                    step_num = i + (self.epoch-1)*self.epoch_steps
+                    self.writer.add_scalar("loss", loss, step_num)
+
+                    i += 1
+
+                    pbar.update(1)
+
+        mean, max = self.evaluate()
+        self.writer.add_scalar("mean eval reward", mean, self.epoch)
+        self.writer.add_scalar("max eval reward", max, self.epoch)
+        print(f"Epoch {self.epoch}:")
+        print(f"  mean reward: {mean}")
+        print(f"  max reward:  {max}")
 
 
 if __name__ == '__main__':
-    dqn = DQN()
-    dqn.train()
+    env = gym.make('Pong-v0')
+    wrapped = wrap_deepmind(env, frame_stack=True)
+
+    dqn = DQN(env=wrapped, atari=True)
+    for i in range(10):
+        dqn.train_epoch()
