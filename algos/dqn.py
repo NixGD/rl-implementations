@@ -66,18 +66,63 @@ class QNetwork(nn.Module):
         return out
 
 
+class QNetworkAtari(nn.Module):
+    def __init__(self, num_actions):
+        super(QNetworkAtari, self).__init__()
+        self.out_dim = num_actions
+
+        self.conv1 = nn.Conv2d(
+            in_channels=4,
+            out_channels=16,
+            kernal_size=8,
+            stride=4),
+        self.conv2 = nn.Conv2d(
+            in_channels=16,
+            out_channels=32,
+            kernal_size=4,
+            stride=2),
+        self.relu = nn.ReLU()
+        self.fc1 = nn.Linear(9*9*32, 256)
+        self.fc2 = nn.Linear(256, num_actions)
+
+    def forward(self, x):
+        x = torch.tensor(x)
+        x = x.permute(0, 3, 1, 2)
+        x = x.float() / 256
+
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = torch.flatten(x)
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+
+        return x
+
+
 class DQN():
-    def __init__(self, gamma=.99, training_steps=10**4):
-        self.env = gym.make('CartPole-v0')
+
+    def __init__(self, env=None, atari=False, gamma=.99,
+                 epoch_steps=10**4, writer=None):
+
+        self.env = gym.make('CartPole-v0') if env is None else env
         self.num_actions = self.env.action_space.n
         self.obs_dim = self.env.observation_space.shape[0]
 
-        self.exp_buf = ExperienceBuffer(1000, self.obs_dim)
-        self.qnet = QNetwork(self.obs_dim, self.num_actions)
+        self.exp_buf = ExperienceBuffer(2000, self.obs_dim)
+        if atari:
+            self.qnet = QNetworkAtari(self.num_actions)
+        else:
+            self. qnet = QNetwork(self.obs_dim, self.num_actions)
+
         self.qnet_opt = optim.Adam(self.qnet.parameters())
 
         self.gamma = gamma
-        self.training_steps = training_steps
+        self.epoch_steps = epoch_steps
+
+        self.writer = SummaryWriter(f"runs/dqn/"+str(datetime.now())) \
+            if writer is None else writer
+
+        self.epoch = 0
 
     def choose_action(self, obs, epsilon):
         if random.random() < epsilon:
