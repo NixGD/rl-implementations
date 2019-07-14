@@ -16,14 +16,19 @@ from tqdm import tqdm
 from statistics import mean
 from datetime import datetime
 
+import argparse
+
+
+EPOCHS = 10
+
 
 class ExperienceBuffer():
-    def __init__(self, size, state_size):
-        self.init_states = torch.zeros([size] + state_size)
-        self.actions = torch.zeros(size, dtype=torch.long)
-        self.rewards = torch.zeros(size)
-        self.next_states = torch.zeros([size] + state_size)
-        self.non_terminal = torch.zeros(size)
+    def __init__(self, size, state_size, device):
+        self.init_states = torch.zeros([size] + state_size).to(device)
+        self.actions = torch.zeros(size, dtype=torch.long).to(device)
+        self.rewards = torch.zeros(size).to(device)
+        self.next_states = torch.zeros([size] + state_size).to(device)
+        self.non_terminal = torch.zeros(size).to(device)
 
         self.size = size
         self.full = False
@@ -95,7 +100,8 @@ class QNetworkAtari(nn.Module):
         self.fc2 = nn.Linear(256, num_actions)
 
     def forward(self, x):
-        x = torch.tensor(x)
+        if type(x) is not torch.Tensor:
+            x = torch.tensor(x)
         x = x.reshape(-1, 84, 84, 4).permute(0, 3, 1, 2)
         x = x.float() / 256
 
@@ -111,12 +117,21 @@ class QNetworkAtari(nn.Module):
 class DQN():
 
     def __init__(self, env=None, atari=False, gamma=.99,
-                 epoch_steps=10**3, writer=None, buffer_size=2000):
+                 epoch_steps=2e3, writer=None, buffer_size=2000,
+                 device=None, evaluation_runs=5):
+
+        if device is None:
+            self.device = torch.device("cuda") if torch.cuda.is_available() \
+                else torch.device("cpu")
+        else:
+            self.device = device
 
         self.env = gym.make('CartPole-v0') if env is None else env
         self.num_actions = self.env.action_space.n
         self.obs_dim = self.env.observation_space.shape[0]
 
+        self.evaluation_runs = evaluation_runs
+        self.atari = atari
         if atari:
             print("using atari")
             self.qnet = QNetworkAtari(self.num_actions)
@@ -125,7 +140,11 @@ class DQN():
         else:
             self.qnet = QNetwork(self.obs_dim, self.num_actions)
 
-        self.exp_buf = ExperienceBuffer(buffer_size, self.obs_dim)
+        self.qnet.to(self.device)
+
+        # TODO: should test if keeping the buffer on the gpu is faster
+        self.exp_buf = ExperienceBuffer(buffer_size, self.obs_dim,
+            device=torch.device("cpu"))
 
         self.qnet_opt = optim.Adam(self.qnet.parameters())
 
@@ -137,6 +156,7 @@ class DQN():
 
         self.epoch = 0
 
+
     def choose_action(self, obs, epsilon):
         if random.random() < epsilon:
             return random.choice(range(self.num_actions))
@@ -147,18 +167,23 @@ class DQN():
     def qnet_loss(self):
         d = self.exp_buf.sample(100)
 
+        for k, x in d.items():
+            if type(x) is not torch.Tensor:
+                x = torch.tensor(x)
+            d[k] = x.to(self.device)
+
         nextqs = self.qnet.forward(d["next_states"])
         maxq, _ = torch.max(nextqs, dim=1)
         ys = d["rewards"] + d["non_terminal"] * self.gamma * maxq
 
-        action_mask = F.one_hot(d["actions"], self.num_actions).float()
         all_qs = self.qnet.forward(d["init_states"])
+        action_mask = F.one_hot(d["actions"], self.num_actions).float()
         qs = torch.sum(action_mask * all_qs, dim=1)
 
         mse = nn.MSELoss()
         return mse(qs, ys)
 
-    def evaluate(self, times=20, epsilon=0.05, render=True):
+    def evaluate(self, times=5, epsilon=0.05, render=False):
         rews = []
         for i in tqdm(range(times)):
             obs = self.env.reset()
@@ -176,6 +201,7 @@ class DQN():
                     self.env.render()
 
             rews.append(tot_rew)
+            print(f"run {i} score: {tot_rew}")
         return mean(rews), max(rews)
 
     def train_epoch(self):
@@ -209,18 +235,39 @@ class DQN():
 
                     pbar.update(1)
 
-        mean, max = self.evaluate()
-        self.writer.add_scalar("mean eval reward", mean, self.epoch)
-        self.writer.add_scalar("max eval reward", max, self.epoch)
-        print(f"Epoch {self.epoch}:")
-        print(f"  mean reward: {mean}")
-        print(f"  max reward:  {max}")
+        if self.evaluation_runs:
+            mean, max = self.evaluate(self.evaluation_runs)
+            self.writer.add_scalar("mean eval reward", mean, self.epoch)
+            self.writer.add_scalar("max eval reward", max, self.epoch)
+            print(f"Epoch {self.epoch}:")
+            print(f"  mean reward: {mean}")
+            print(f"  max reward:  {max}")
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='PyTorch Example')
+    parser.add_argument('--disable-cuda', action='store_true',
+                    help='Disable CUDA')
+    parser.add_argument('--minimal', action='store_true',
+                    help='Lowers parameters to give a quick system test')
+    args = parser.parse_args()
+
     env = gym.make('Pong-v0')
     wrapped = wrap_deepmind(env, frame_stack=True)
 
-    dqn = DQN(env=wrapped, atari=True)
-    for i in range(10):
+    dqn_args = {
+        "env" : wrapped,
+        "atari" : True
+    }
+
+    if args.disable_cuda:
+        dqn_args["device"] = torch.device('cpu')
+
+    if args.minimal:
+        dqn_args["epoch_steps"] = 50
+        dqn_args["evaluation_runs"] = 0
+        EPOCHS = 1
+
+    dqn = DQN(**dqn_args)
+    for i in range(EPOCHS):
         dqn.train_epoch()
