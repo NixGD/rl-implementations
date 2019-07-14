@@ -1,5 +1,6 @@
 torch >= 1.1
-gym >= 0.13
+gym[atari] >= 0.13
 tensorboardX  >= 1.8
 tqdm
 baselines
+opencv-python

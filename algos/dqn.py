@@ -161,7 +161,7 @@ class DQN():
         if random.random() < epsilon:
             return random.choice(range(self.num_actions))
         else:
-            qvals = self.qnet.forward(obs)
+            qvals = self.qnet.forward(obs.to(self.device))
             return torch.argmax(qvals).item()
 
     def qnet_loss(self):
