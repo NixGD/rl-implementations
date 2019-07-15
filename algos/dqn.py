@@ -118,7 +118,8 @@ class DQN():
 
     def __init__(self, env=None, atari=False, gamma=.99,
                  epoch_steps=2e3, writer=None, buffer_size=2000,
-                 device=None, evaluation_runs=5):
+                 device=None, evaluation_runs=5, batch_size = 1024,
+                 state_sample_size = 500):
 
         if device is None:
             self.device = torch.device("cuda") if torch.cuda.is_available() \
@@ -130,6 +131,7 @@ class DQN():
         self.num_actions = self.env.action_space.n
         self.obs_dim = self.env.observation_space.shape[0]
 
+        self.batch_size = batch_size
         self.evaluation_runs = evaluation_runs
         self.atari = atari
         if atari:
@@ -156,6 +158,9 @@ class DQN():
 
         self.epoch = 0
 
+        self.state_sample = None
+        self.state_sample_size = state_sample_size
+
 
     def choose_action(self, obs, epsilon):
         if random.random() < epsilon:
@@ -165,7 +170,7 @@ class DQN():
             return torch.argmax(qvals).item()
 
     def qnet_loss(self):
-        d = self.exp_buf.sample(100)
+        d = self.exp_buf.sample(self.batch_size)
 
         for k, x in d.items():
             if type(x) is not torch.Tensor:
@@ -243,6 +248,15 @@ class DQN():
             print(f"  mean reward: {mean}")
             print(f"  max reward:  {max}")
 
+        if self.state_sample is None:
+            d = self.exp_buf.sample(self.state_sample_size)
+            states = d["init_states"]
+            self.state_sample = states.to(self.device)
+
+        mean_q = self.qnet.forward(self.state_sample).mean().item()
+        self.writer.add_scalar("mean sample q", mean_q, self.epoch)
+        print(mean_q)
+        
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='PyTorch Example')
