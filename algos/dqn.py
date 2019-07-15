@@ -21,7 +21,7 @@ import argparse
 import os
 
 
-EPOCHS = 10
+EPOCHS = 50
 
 
 class ExperienceBuffer():
