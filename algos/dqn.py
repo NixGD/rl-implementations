@@ -111,7 +111,7 @@ class QNetworkAtari(nn.Module):
         x = F.relu(self.conv2(x))
         x = torch.flatten(x, 1)
         x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
+        x = self.fc2(x)
 
         return x
 
@@ -119,8 +119,8 @@ class QNetworkAtari(nn.Module):
 class DQN():
 
     def __init__(self, env=None, atari=False, gamma=.99,
-                 epoch_steps=1e4, writer=None, buffer_size=10000,
-                 device=None, evaluation_runs=5, batch_size = 1024,
+                 epoch_steps=2e3, writer=None, buffer_size=2000,
+                 device=None, evaluation_runs=5, batch_size = 512,
                  state_sample_size = 1000):
 
         if device is None:
@@ -212,11 +212,13 @@ class DQN():
                 tqdm(range(self.evaluation_runs))
             ]
 
+            print("")
             mean_rew, max_rew = statistics.mean(rews), max(rews)
 
             self.writer.add_scalar("mean eval reward", mean_rew, self.epoch)
             self.writer.add_scalar("max eval reward", max_rew, self.epoch)
             print(f"Epoch {self.epoch}:")
+            print(f"  rewards: {rews}")
             print(f"  mean reward: {mean_rew}")
             print(f"  max reward:  {max_rew}")
 
@@ -225,9 +227,13 @@ class DQN():
             states = d["init_states"]
             self.state_sample = states.to(self.device)
 
-        mean_q = self.qnet.forward(self.state_sample).mean().item()
+        # Calculate the expected reward from the best-action in a constant
+        # sample of different states
+        sample_qs = self.qnet.forward(self.state_sample)
+        sample_max_qs, _ = torch.max(sample_qs, dim=1)
+        mean_q = sample_max_qs.mean().item()
         self.writer.add_scalar("mean sample q", mean_q, self.epoch)
-        print(f"mean q of sampled states is {mean_q}")
+        print(f"mean q of sampled states is {mean_q:.6}")
 
     def train_epoch(self):
         self.epoch += 1
@@ -244,6 +250,7 @@ class DQN():
                     init_obs = obs
                     act = self.choose_action(obs, 0.05)
                     obs, rew, done, _ = self.env.step(act)
+                    assert not rew
 
                     obs = torch.tensor(obs, dtype=torch.float)
                     self.exp_buf.store(init_obs, act, rew, obs, done)
