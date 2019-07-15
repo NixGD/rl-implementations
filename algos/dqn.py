@@ -17,6 +17,7 @@ from statistics import mean
 from datetime import datetime
 
 import argparse
+import os
 
 
 EPOCHS = 10
@@ -117,9 +118,9 @@ class QNetworkAtari(nn.Module):
 class DQN():
 
     def __init__(self, env=None, atari=False, gamma=.99,
-                 epoch_steps=2e3, writer=None, buffer_size=2000,
+                 epoch_steps=1e4, writer=None, buffer_size=10000,
                  device=None, evaluation_runs=5, batch_size = 1024,
-                 state_sample_size = 500):
+                 state_sample_size = 1000):
 
         if device is None:
             self.device = torch.device("cuda") if torch.cuda.is_available() \
@@ -153,7 +154,8 @@ class DQN():
         self.gamma = gamma
         self.epoch_steps = epoch_steps
 
-        self.writer = SummaryWriter(f"runs/dqn/"+str(datetime.now())) \
+        self.run_time = str(datetime.now())
+        self.writer = SummaryWriter(f"runs/dqn/{self.run_time}") \
             if writer is None else writer
 
         self.epoch = 0
@@ -188,26 +190,47 @@ class DQN():
         mse = nn.MSELoss()
         return mse(qs, ys)
 
-    def evaluate(self, times=5, epsilon=0.05, render=False):
-        rews = []
-        for i in tqdm(range(times)):
-            obs = self.env.reset()
-            done = False
-            tot_rew = 0
+    def _evaluation_run():
+        obs = self.env.reset()
+        done = False
+        tot_rew = 0
+        if render and not i:
+            self.env.render()
+
+        while not done:
+            obs = torch.tensor(obs, dtype=torch.float)
+            act = self.choose_action(obs, 0.05)
+            obs, rew, done, _ = self.env.step(act)
+            tot_rew += rew
             if render and not i:
                 self.env.render()
 
-            while not done:
-                obs = torch.tensor(obs, dtype=torch.float)
-                act = self.choose_action(obs, 0.05)
-                obs, rew, done, _ = self.env.step(act)
-                tot_rew += rew
-                if render and not i:
-                    self.env.render()
+        return tot_rew
 
-            rews.append(tot_rew)
-            print(f"run {i} score: {tot_rew}")
-        return mean(rews), max(rews)
+
+    def evaluate(self, epsilon=0.05, render=False):
+        if self.evaluation_runs:
+            rews = [
+                _evaluation_run() for _ in
+                tqdm(range(self.evaluation_runs))
+            ]
+
+            mean, max = mean(rews), max(rews)
+
+            self.writer.add_scalar("mean eval reward", mean, self.epoch)
+            self.writer.add_scalar("max eval reward", max, self.epoch)
+            print(f"Epoch {self.epoch}:")
+            print(f"  mean reward: {mean}")
+            print(f"  max reward:  {max}")
+
+        if self.state_sample is None:
+            d = self.exp_buf.sample(self.state_sample_size)
+            states = d["init_states"]
+            self.state_sample = states.to(self.device)
+
+        mean_q = self.qnet.forward(self.state_sample).mean().item()
+        self.writer.add_scalar("mean sample q", mean_q, self.epoch)
+        print(f"mean q of sampled states is {mean_q}")
 
     def train_epoch(self):
         self.epoch += 1
@@ -240,23 +263,18 @@ class DQN():
 
                     pbar.update(1)
 
-        if self.evaluation_runs:
-            mean, max = self.evaluate(self.evaluation_runs)
-            self.writer.add_scalar("mean eval reward", mean, self.epoch)
-            self.writer.add_scalar("max eval reward", max, self.epoch)
-            print(f"Epoch {self.epoch}:")
-            print(f"  mean reward: {mean}")
-            print(f"  max reward:  {max}")
+        self.evaluate()
 
-        if self.state_sample is None:
-            d = self.exp_buf.sample(self.state_sample_size)
-            states = d["init_states"]
-            self.state_sample = states.to(self.device)
+        filename = f"models/{self.run_time}/{self.epoch}.pt"
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        with open(filename, "wb") as f:
+            torch.save({
+                'epoch': self.epoch,
+                'qnet_state_dict': self.qnet.state_dict(),
+                'qnet_opt_state_dict': self.qnet_opt.state_dict(),
+                'state_sample': self.state_sample
+                }, f)
 
-        mean_q = self.qnet.forward(self.state_sample).mean().item()
-        self.writer.add_scalar("mean sample q", mean_q, self.epoch)
-        print(mean_q)
-        
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='PyTorch Example')

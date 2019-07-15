@@ -1,6 +1,11 @@
-# tensorboard logs
+# tensorboardx logs
 runs/
 
+# saved models
+models/
+
+# test notebook
+Tests.ipynb
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
