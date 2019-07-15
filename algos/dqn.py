@@ -120,8 +120,8 @@ class DQN():
 
     def __init__(self, env=None, atari=False, gamma=.99,
                  epoch_steps=2e3, writer=None, buffer_size=2000,
-                 device=None, evaluation_runs=5, batch_size = 512,
-                 state_sample_size = 1000):
+                 device=None, evaluation_runs=5, batch_size=512,
+                 state_sample_size=1000):
 
         if device is None:
             self.device = torch.device("cuda") if torch.cuda.is_available() \
@@ -148,13 +148,14 @@ class DQN():
 
         # TODO: should test if keeping the buffer on the gpu is faster
         self.exp_buf = ExperienceBuffer(buffer_size, self.obs_dim,
-            device=torch.device("cpu"))
+                                        device=torch.device("cpu"))
 
         self.qnet_opt = optim.Adam(self.qnet.parameters())
 
         self.gamma = gamma
         self.epoch_steps = epoch_steps
 
+        # writer never closes!
         self.run_time = str(datetime.now())
         self.writer = SummaryWriter(f"runs/dqn/{self.run_time}") \
             if writer is None else writer
@@ -163,7 +164,6 @@ class DQN():
 
         self.state_sample = None
         self.state_sample_size = state_sample_size
-
 
     def choose_action(self, obs, epsilon):
         if random.random() < epsilon:
@@ -203,7 +203,6 @@ class DQN():
             tot_rew += rew
 
         return tot_rew
-
 
     def evaluate(self, epsilon=0.05, render=False):
         if self.evaluation_runs:
@@ -278,21 +277,27 @@ class DQN():
                 'state_sample': self.state_sample
                 }, f)
 
+    def close_writer(self):
+        self.writer.close()
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='PyTorch Example')
     parser.add_argument('--disable-cuda', action='store_true',
-                    help='Disable CUDA')
+                        help='Disable CUDA')
     parser.add_argument('--minimal', action='store_true',
-                    help='Lowers parameters to give a quick system test')
+                        help='Lowers parameters to give a quick system test')
     args = parser.parse_args()
 
     env = gym.make('Pong-v0')
-    wrapped = wrap_deepmind(env, frame_stack=True)
+
+    # We don't use episode_life because pong doesn't have life and sometimes
+    # we want to reset when the enviroment isn't done.
+    wrapped = wrap_deepmind(env, frame_stack=True, episode_life=False)
 
     dqn_args = {
-        "env" : wrapped,
-        "atari" : True
+        "env": wrapped,
+        "atari": True
     }
 
     if args.disable_cuda:
@@ -306,3 +311,4 @@ if __name__ == '__main__':
     dqn = DQN(**dqn_args)
     for i in range(EPOCHS):
         dqn.train_epoch()
+    dqn.close_writer()
