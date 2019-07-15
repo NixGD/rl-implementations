@@ -118,10 +118,10 @@ class QNetworkAtari(nn.Module):
 
 class DQN():
 
-    def __init__(self, env=None, atari=False, gamma=.99,
-                 epoch_steps=2e3, writer=None, buffer_size=2000,
-                 device=None, evaluation_runs=5, batch_size=512,
-                 state_sample_size=1000):
+    def __init__(self, env=None, atari=False, lr=1e-4, gamma=.99,
+                 epoch_steps=1e4, writer=None, buffer_size=10000,
+                 device=None, evaluation_runs=5, batch_size=32,
+                 state_sample_size=128):
 
         if device is None:
             self.device = torch.device("cuda") if torch.cuda.is_available() \
@@ -150,7 +150,7 @@ class DQN():
         self.exp_buf = ExperienceBuffer(buffer_size, self.obs_dim,
                                         device=torch.device("cpu"))
 
-        self.qnet_opt = optim.Adam(self.qnet.parameters())
+        self.qnet_opt = optim.Adam(self.qnet.parameters(), lr=lr)
 
         self.gamma = gamma
         self.epoch_steps = epoch_steps
@@ -159,6 +159,8 @@ class DQN():
         self.run_time = str(datetime.now())
         self.writer = SummaryWriter(f"runs/dqn/{self.run_time}") \
             if writer is None else writer
+
+        print(f"Run time: {self.run_time}")
 
         self.epoch = 0
 
@@ -234,6 +236,14 @@ class DQN():
         self.writer.add_scalar("mean sample q", mean_q, self.epoch)
         print(f"mean q of sampled states is {mean_q:.6}")
 
+    def decayed_epsilon(self, step_num):
+        decay_steps = 1e5
+        end_value = 0.02
+        if step_num < decay_steps:
+            return 1 - (1-end_value) * step_num / decay_steps
+        else:
+            return end_value
+
     def train_epoch(self):
         self.epoch += 1
         i = 0
@@ -246,8 +256,10 @@ class DQN():
                 done = False
 
                 while (not done) and (i < self.epoch_steps):
+                    step_num = i + (self.epoch-1)*self.epoch_steps
+
                     init_obs = obs
-                    act = self.choose_action(obs, 0.05)
+                    act = self.choose_action(obs, self.decayed_epsilon(step_num))
                     obs, rew, done, _ = self.env.step(act)
 
                     obs = torch.tensor(obs, dtype=torch.float)
@@ -258,7 +270,6 @@ class DQN():
                     loss.backward()
                     self.qnet_opt.step()
 
-                    step_num = i + (self.epoch-1)*self.epoch_steps
                     self.writer.add_scalar("loss", loss, step_num)
 
                     i += 1
