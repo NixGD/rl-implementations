@@ -250,7 +250,6 @@ class DQN():
                     init_obs = obs
                     act = self.choose_action(obs, 0.05)
                     obs, rew, done, _ = self.env.step(act)
-                    assert not rew
 
                     obs = torch.tensor(obs, dtype=torch.float)
                     self.exp_buf.store(init_obs, act, rew, obs, done)
