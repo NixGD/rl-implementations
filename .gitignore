@@ -1,5 +1,6 @@
 # tensorboardx logs
 runs/
+vm-runs/
 
 # saved models
 models/

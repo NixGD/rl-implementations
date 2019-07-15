@@ -13,7 +13,8 @@ from tensorboardX import SummaryWriter
 
 from tqdm import tqdm
 
-from statistics import mean
+
+import statistics
 from datetime import datetime
 
 import argparse
@@ -190,20 +191,16 @@ class DQN():
         mse = nn.MSELoss()
         return mse(qs, ys)
 
-    def _evaluation_run():
+    def _evaluation_run(self):
         obs = self.env.reset()
         done = False
         tot_rew = 0
-        if render and not i:
-            self.env.render()
 
         while not done:
             obs = torch.tensor(obs, dtype=torch.float)
             act = self.choose_action(obs, 0.05)
             obs, rew, done, _ = self.env.step(act)
             tot_rew += rew
-            if render and not i:
-                self.env.render()
 
         return tot_rew
 
@@ -211,17 +208,17 @@ class DQN():
     def evaluate(self, epsilon=0.05, render=False):
         if self.evaluation_runs:
             rews = [
-                _evaluation_run() for _ in
+                self._evaluation_run() for _ in
                 tqdm(range(self.evaluation_runs))
             ]
 
-            mean, max = mean(rews), max(rews)
+            mean_rew, max_rew = statistics.mean(rews), max(rews)
 
-            self.writer.add_scalar("mean eval reward", mean, self.epoch)
-            self.writer.add_scalar("max eval reward", max, self.epoch)
+            self.writer.add_scalar("mean eval reward", mean_rew, self.epoch)
+            self.writer.add_scalar("max eval reward", max_rew, self.epoch)
             print(f"Epoch {self.epoch}:")
-            print(f"  mean reward: {mean}")
-            print(f"  max reward:  {max}")
+            print(f"  mean reward: {mean_rew}")
+            print(f"  max reward:  {max_rew}")
 
         if self.state_sample is None:
             d = self.exp_buf.sample(self.state_sample_size)
@@ -297,7 +294,7 @@ if __name__ == '__main__':
 
     if args.minimal:
         dqn_args["epoch_steps"] = 50
-        dqn_args["evaluation_runs"] = 0
+        dqn_args["evaluation_runs"] = 1
         EPOCHS = 1
 
     dqn = DQN(**dqn_args)
