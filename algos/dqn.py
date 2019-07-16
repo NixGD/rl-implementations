@@ -226,22 +226,32 @@ class DQN():
 
         return tot_rew
 
-    def evaluate(self, epsilon=0.05, render=False):
+    def evaluate(self, rewards, epsilon=0.05, render=False):
+        print(f"\nEpoch {self.epoch} training statistics:")
+
+        if rewards:
+            mean_train_rew = statistics.mean(rewards)
+            self.writer.add_scalar("mean train rewards",
+                                   mean_train_rew, self.epoch)
+            print(f"  train rewards: {rewards}")
+            print(f"  mean train rewards: {mean_train_rew}")
+
+        print(f"\nEvaluating...")
+
         if self.evaluation_runs:
             rews = [
                 self._evaluation_run() for _ in
                 tqdm(range(self.evaluation_runs))
             ]
 
-            print("")
+            print(f"\nEpoch {self.epoch} evaluation statistics:")
             mean_rew, max_rew = statistics.mean(rews), max(rews)
 
             self.writer.add_scalar("mean eval reward", mean_rew, self.epoch)
             self.writer.add_scalar("max eval reward", max_rew, self.epoch)
-            print(f"Epoch {self.epoch}:")
-            print(f"  rewards: {rews}")
-            print(f"  mean reward: {mean_rew}")
-            print(f"  max reward:  {max_rew}")
+            print(f"  eval rewards: {rews}")
+            print(f"  mean eval reward: {mean_rew}")
+            print(f"  max eval reward:  {max_rew}")
 
         if self.state_sample is None:
             d = self.exp_buf.sample(self.state_sample_size)
@@ -254,7 +264,7 @@ class DQN():
         sample_max_qs, _ = torch.max(sample_qs, dim=1)
         mean_q = sample_max_qs.mean().item()
         self.writer.add_scalar("mean sample q", mean_q, self.epoch)
-        print(f"mean q of sampled states is {mean_q:.6}")
+        print(f"  mean q of sampled states is {mean_q:.6}")
 
     def decayed_epsilon(self, step_num):
         decay_steps = 1e5
@@ -297,12 +307,11 @@ class DQN():
                     i += 1
                     pbar.update(1)
 
-                rewards.append(tot_rew)
-                self.writer.add_scalar("episode reward", tot_rew, step_num)
+                if done:
+                    rewards.append(tot_rew)
+                    self.writer.add_scalar("episode reward", tot_rew, step_num)
 
-            mean_rew = statistics.mean(rewards)
-            self.writer.add_scalar("mean train rewards", mean_rew, self.epoch)
-        self.evaluate()
+        self.evaluate(rewards)
 
         if self.save_models:
             self.save_model()
@@ -354,6 +363,6 @@ if __name__ == '__main__':
 
     dqn = DQN(**dqn_args)
     for i in range(EPOCHS):
-        print(f"\n\nEpoch {i}/{EPOCHS}")
+        print(f"\n\nEpoch {i+1}/{EPOCHS}")
         dqn.train_epoch()
     dqn.close_writer()
