@@ -4,6 +4,7 @@ vm-runs/
 
 # saved models
 models/
+vm-models/
 
 # test notebook
 Tests.ipynb
