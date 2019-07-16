@@ -26,25 +26,23 @@ EPOCHS = 50
 
 class ExperienceBuffer():
     def __init__(self, size, state_size, device):
-        self.init_states = torch.zeros([size] + state_size).to(device)
-        self.actions = torch.zeros(size, dtype=torch.long).to(device)
-        self.rewards = torch.zeros(size).to(device)
-        self.next_states = torch.zeros([size] + state_size).to(device)
-        self.non_terminal = torch.zeros(size).to(device)
-
         self.size = size
+        self.state_size = state_size
+        self.device = device
+
+        self.storage = []
         self.full = False
         self.i = 0
 
-    def store(self, init_state, action, reward, next_state, next_terminal):
+    def store(self, init_state, act, rew, next_state, next_terminal):
 
         assert self.i < self.size
 
-        self.init_states[self.i, :] = init_state
-        self.actions[self.i] = action
-        self.rewards[self.i] = reward
-        self.next_states[self.i, :] = next_state
-        self.non_terminal[self.i] = int(not next_terminal)
+        data = (init_state, act, rew, next_state, not next_terminal)
+        if self.full:
+            self.storage[i] = data
+        else:
+            self.storage.append(data)
 
         self.i += 1
         if self.i == self.size:
@@ -52,17 +50,25 @@ class ExperienceBuffer():
             self.i = 0
 
     def sample(self, size):
+        max = min(size, len(self.storage))
+        chosen = random.choices(range(max), k=size)
 
-        indexes = np.arange(self.size) if self.full else np.arange(self.i)
-        size = min(size, len(indexes))
+        s0s, acts, rews, s1s, non_terms = [], [], [], [], []
 
-        chosen = np.random.choice(indexes, size=size, replace=False)
+        for i, storage_loc in enumerate(chosen):
+            s0, act, rew, s1, non_term = self.storage[storage_loc]
+            s0s.append(np.array(s0, copy=False))
+            acts.append(act)
+            rews.append(rew)
+            s1s.append(np.array(s0, copy=False))
+            non_terms.append(non_term)
+
         return {
-            "init_states": self.init_states[chosen, :],
-            "actions": self.actions[chosen],
-            "rewards": self.rewards[chosen],
-            "next_states": self.next_states[chosen, :],
-            "non_terminal": self.non_terminal[chosen]
+            "init_states": np.array(s0s),
+            "actions": acts,
+            "rewards": rews,
+            "next_states": np.array(s1s),
+            "non_terminal": non_terms
         }
 
 
@@ -120,14 +126,22 @@ class DQN():
 
     def __init__(self, env=None, atari=False, lr=1e-4, gamma=.99,
                  epoch_steps=1e4, writer=None, buffer_size=10000,
-                 device=None, evaluation_runs=5, batch_size=32,
-                 state_sample_size=128):
+                 device=None, evaluation_runs=2, batch_size=32,
+                 state_sample_size=512, prefill_buffer_size=10000,
+                 save_models=True):
 
         if device is None:
             self.device = torch.device("cuda") if torch.cuda.is_available() \
                 else torch.device("cpu")
         else:
             self.device = device
+
+        # writer never closes!
+        self.run_time = str(datetime.now())
+        self.writer = SummaryWriter(f"runs/dqn/{self.run_time}") \
+            if writer is None else writer
+
+        print(f"Run time: {self.run_time}")
 
         self.env = gym.make('CartPole-v0') if env is None else env
         self.num_actions = self.env.action_space.n
@@ -149,29 +163,36 @@ class DQN():
         # TODO: should test if keeping the buffer on the gpu is faster
         self.exp_buf = ExperienceBuffer(buffer_size, self.obs_dim,
                                         device=torch.device("cpu"))
+        self.initialize_buffer(prefill_buffer_size)
 
         self.qnet_opt = optim.Adam(self.qnet.parameters(), lr=lr)
 
         self.gamma = gamma
         self.epoch_steps = epoch_steps
-
-        # writer never closes!
-        self.run_time = str(datetime.now())
-        self.writer = SummaryWriter(f"runs/dqn/{self.run_time}") \
-            if writer is None else writer
-
-        print(f"Run time: {self.run_time}")
-
         self.epoch = 0
+        self.save_models = save_models
 
         self.state_sample = None
         self.state_sample_size = state_sample_size
+
+    def initialize_buffer(self, steps=10000):
+        done = True
+        obs = None
+        print("\nInitializing buffer:")
+        for i in tqdm(range(steps)):
+            if done:
+                obs = self.env.reset()
+            init_obs = obs
+            act = random.choice(range(self.num_actions))
+            obs, rew, done, _ = self.env.step(act)
+            self.exp_buf.store(init_obs, act, rew, obs, done)
 
     def choose_action(self, obs, epsilon):
         if random.random() < epsilon:
             return random.choice(range(self.num_actions))
         else:
-            qvals = self.qnet.forward(obs.to(self.device))
+            t_obs = torch.tensor(obs, dtype=torch.float).to(self.device)
+            qvals = self.qnet.forward(t_obs)
             return torch.argmax(qvals).item()
 
     def qnet_loss(self):
@@ -184,10 +205,10 @@ class DQN():
 
         nextqs = self.qnet.forward(d["next_states"])
         maxq, _ = torch.max(nextqs, dim=1)
-        ys = d["rewards"] + d["non_terminal"] * self.gamma * maxq
+        ys = d["rewards"].float() + d["non_terminal"].float() * self.gamma * maxq
 
         all_qs = self.qnet.forward(d["init_states"])
-        action_mask = F.one_hot(d["actions"], self.num_actions).float()
+        action_mask = F.one_hot(d["actions"].long(), self.num_actions).float()
         qs = torch.sum(action_mask * all_qs, dim=1)
 
         mse = nn.MSELoss()
@@ -199,7 +220,6 @@ class DQN():
         tot_rew = 0
 
         while not done:
-            obs = torch.tensor(obs, dtype=torch.float)
             act = self.choose_action(obs, 0.05)
             obs, rew, done, _ = self.env.step(act)
             tot_rew += rew
@@ -225,7 +245,7 @@ class DQN():
 
         if self.state_sample is None:
             d = self.exp_buf.sample(self.state_sample_size)
-            states = d["init_states"]
+            states = torch.tensor(d["init_states"])
             self.state_sample = states.to(self.device)
 
         # Calculate the expected reward from the best-action in a constant
@@ -248,12 +268,14 @@ class DQN():
         self.epoch += 1
         i = 0
 
+        rewards = []
         with tqdm(total=self.epoch_steps) as pbar:
             while i < self.epoch_steps:
-                obs = torch.tensor(self.env.reset(), dtype=torch.float)
+                obs = self.env.reset()
                 for _ in range(6):
                     _ = self.env.step(0)
                 done = False
+                tot_rew = 0
 
                 while (not done) and (i < self.epoch_steps):
                     step_num = i + (self.epoch-1)*self.epoch_steps
@@ -262,7 +284,7 @@ class DQN():
                     act = self.choose_action(obs, self.decayed_epsilon(step_num))
                     obs, rew, done, _ = self.env.step(act)
 
-                    obs = torch.tensor(obs, dtype=torch.float)
+                    tot_rew += rew
                     self.exp_buf.store(init_obs, act, rew, obs, done)
 
                     self.qnet_opt.zero_grad()
@@ -273,19 +295,27 @@ class DQN():
                     self.writer.add_scalar("loss", loss, step_num)
 
                     i += 1
-
                     pbar.update(1)
 
+                rewards.append(tot_rew)
+                self.writer.add_scalar("episode reward", tot_rew, step_num)
+
+            mean_rew = statistics.mean(rewards)
+            self.writer.add_scalar("mean train rewards", mean_rew, self.epoch)
         self.evaluate()
 
+        if self.save_models:
+            self.save_model()
+
+    def save_model(self):
         filename = f"models/{self.run_time}/{self.epoch}.pt"
         os.makedirs(os.path.dirname(filename), exist_ok=True)
         with open(filename, "wb") as f:
             torch.save({
                 'epoch': self.epoch,
-                'qnet_state_dict': self.qnet.state_dict(),
-                'qnet_opt_state_dict': self.qnet_opt.state_dict(),
-                'state_sample': self.state_sample
+                'qnet_state_dict': self.qnet.state_dict(),  # ~3MB
+                'qnet_opt_state_dict': self.qnet_opt.state_dict(),  # ~5MB
+                'state_sample': self.state_sample  # ~15MB
                 }, f)
 
     def close_writer(self):
@@ -317,9 +347,13 @@ if __name__ == '__main__':
     if args.minimal:
         dqn_args["epoch_steps"] = 50
         dqn_args["evaluation_runs"] = 1
+        dqn_args["prefill_buffer_size"] = 100
+        dqn_args["save_models"] = False
+        dqn_args["writer"] = SummaryWriter(f"runs/tmp/{str(datetime.now())}")
         EPOCHS = 1
 
     dqn = DQN(**dqn_args)
     for i in range(EPOCHS):
+        print(f"\n\nEpoch {i}/{EPOCHS}")
         dqn.train_epoch()
     dqn.close_writer()
