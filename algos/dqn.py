@@ -4,19 +4,17 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 import numpy as np
-import random
 
 import gym
 from baselines.common.atari_wrappers import wrap_deepmind
 
 from tensorboardX import SummaryWriter
-
 from tqdm import tqdm
-
 
 import statistics
 from datetime import datetime
-
+import random
+import copy
 import argparse
 import os
 
@@ -40,7 +38,7 @@ class ExperienceBuffer():
 
         data = (init_state, act, rew, next_state, not next_terminal)
         if self.full:
-            self.storage[i] = data
+            self.storage[self.i] = data
         else:
             self.storage.append(data)
 
@@ -50,17 +48,15 @@ class ExperienceBuffer():
             self.i = 0
 
     def sample(self, size):
-        max = min(size, len(self.storage))
-        chosen = random.choices(range(max), k=size)
 
+        sampled_data = random.choices(self.storage, k=size)
         s0s, acts, rews, s1s, non_terms = [], [], [], [], []
 
-        for i, storage_loc in enumerate(chosen):
-            s0, act, rew, s1, non_term = self.storage[storage_loc]
+        for s0, act, rew, s1, non_term in sampled_data:
             s0s.append(np.array(s0, copy=False))
             acts.append(act)
             rews.append(rew)
-            s1s.append(np.array(s0, copy=False))
+            s1s.append(np.array(s1, copy=False))
             non_terms.append(non_term)
 
         return {
@@ -128,7 +124,7 @@ class DQN():
                  epoch_steps=1e4, writer=None, buffer_size=10000,
                  device=None, evaluation_runs=2, batch_size=32,
                  state_sample_size=512, prefill_buffer_size=10000,
-                 save_models=True):
+                 sync_frequency=1000, save_models=True):
 
         if device is None:
             self.device = torch.device("cuda") if torch.cuda.is_available() \
@@ -147,6 +143,7 @@ class DQN():
         self.num_actions = self.env.action_space.n
         self.obs_dim = self.env.observation_space.shape[0]
 
+        self.sync_frequency = sync_frequency
         self.batch_size = batch_size
         self.evaluation_runs = evaluation_runs
         self.atari = atari
@@ -159,6 +156,7 @@ class DQN():
             self.qnet = QNetwork(self.obs_dim, self.num_actions)
 
         self.qnet.to(self.device)
+        self.target_net = copy.deepcopy(self.qnet).to(self.device)
 
         # TODO: should test if keeping the buffer on the gpu is faster
         self.exp_buf = ExperienceBuffer(buffer_size, self.obs_dim,
@@ -203,24 +201,24 @@ class DQN():
                 x = torch.tensor(x)
             d[k] = x.to(self.device)
 
-        nextqs = self.qnet.forward(d["next_states"])
+        nextqs = self.target_net.forward(d["next_states"].float())
         maxq, _ = torch.max(nextqs, dim=1)
         ys = d["rewards"].float() + d["non_terminal"].float() * self.gamma * maxq
 
-        all_qs = self.qnet.forward(d["init_states"])
+        all_qs = self.qnet.forward(d["init_states"].float())
         action_mask = F.one_hot(d["actions"].long(), self.num_actions).float()
         qs = torch.sum(action_mask * all_qs, dim=1)
 
         mse = nn.MSELoss()
         return mse(qs, ys)
 
-    def _evaluation_run(self):
+    def _evaluation_run(self, epsilon=0.05):
         obs = self.env.reset()
         done = False
         tot_rew = 0
 
         while not done:
-            act = self.choose_action(obs, 0.05)
+            act = self.choose_action(obs, epsilon)
             obs, rew, done, _ = self.env.step(act)
             tot_rew += rew
 
@@ -233,7 +231,8 @@ class DQN():
             mean_train_rew = statistics.mean(rewards)
             self.writer.add_scalar("mean train rewards",
                                    mean_train_rew, self.epoch)
-            print(f"  train rewards: {rewards}")
+            if len(rewards) <= 5:
+                print(f"  train rewards: {rewards}")
             print(f"  mean train rewards: {mean_train_rew}")
 
         print(f"\nEvaluating...")
@@ -255,7 +254,7 @@ class DQN():
 
         if self.state_sample is None:
             d = self.exp_buf.sample(self.state_sample_size)
-            states = torch.tensor(d["init_states"])
+            states = torch.tensor(d["init_states"]).float()
             self.state_sample = states.to(self.device)
 
         # Calculate the expected reward from the best-action in a constant
@@ -274,6 +273,9 @@ class DQN():
         else:
             return end_value
 
+    def sync_target_net(self):
+        self.target_net.load_state_dict(self.qnet.state_dict())
+
     def train_epoch(self):
         self.epoch += 1
         i = 0
@@ -282,8 +284,6 @@ class DQN():
         with tqdm(total=self.epoch_steps) as pbar:
             while i < self.epoch_steps:
                 obs = self.env.reset()
-                for _ in range(6):
-                    _ = self.env.step(0)
                 done = False
                 tot_rew = 0
 
@@ -301,6 +301,9 @@ class DQN():
                     loss = self.qnet_loss()
                     loss.backward()
                     self.qnet_opt.step()
+
+                    if not i % self.sync_frequency:
+                        self.sync_target_net()
 
                     self.writer.add_scalar("loss", loss, step_num)
 
@@ -331,6 +334,8 @@ class DQN():
         self.writer.close()
 
 
+EPOCHS = 50
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='PyTorch Example')
     parser.add_argument('--disable-cuda', action='store_true',
@@ -346,8 +351,8 @@ if __name__ == '__main__':
     wrapped = wrap_deepmind(env, frame_stack=True, episode_life=False)
 
     dqn_args = {
-        "env": wrapped,
-        "atari": True
+        # "env": wrapped,
+        # "atari": True
     }
 
     if args.disable_cuda:
