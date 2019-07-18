@@ -281,6 +281,8 @@ class DQN():
         i = 0
 
         rewards = []
+
+        loss_to_log = []
         with tqdm(total=self.epoch_steps) as pbar:
             while i < self.epoch_steps:
                 obs = self.env.reset()
@@ -302,10 +304,14 @@ class DQN():
                     loss.backward()
                     self.qnet_opt.step()
 
-                    if not i % self.sync_frequency:
+                    if not step_num % self.sync_frequency:
                         self.sync_target_net()
 
-                    self.writer.add_scalar("loss", loss, step_num)
+                    loss_to_log.append(loss.item())
+                    if not step_num % 100:
+                        mean_loss = statistics.mean(loss_to_log)
+                        self.writer.add_scalar("loss", mean_loss, step_num)
+                        loss_to_log = []
 
                     i += 1
                     pbar.update(1)
@@ -342,17 +348,22 @@ if __name__ == '__main__':
                         help='Disable CUDA')
     parser.add_argument('--minimal', action='store_true',
                         help='Lowers parameters to give a quick system test')
+    parser.add_argument('--no-skip',  action='store_true',
+                        help='Uses PongNoFrameskip-v4 as the enviroment')
+    parser.add_argument('--epochs', type=int, default=50,
+                        help='Number of epochs to run for')
     args = parser.parse_args()
 
-    env = gym.make('Pong-v0')
+    envname = 'PongNoFrameskip-v4' if args.no_skip else 'Pong-v0'
+    env = gym.make(envname)
 
     # We don't use episode_life because pong doesn't have life and sometimes
     # we want to reset when the enviroment isn't done.
     wrapped = wrap_deepmind(env, frame_stack=True, episode_life=False)
 
     dqn_args = {
-        # "env": wrapped,
-        # "atari": True
+        "env": wrapped,
+        "atari": True
     }
 
     if args.disable_cuda:
@@ -364,10 +375,10 @@ if __name__ == '__main__':
         dqn_args["prefill_buffer_size"] = 100
         dqn_args["save_models"] = False
         dqn_args["writer"] = SummaryWriter(f"runs/tmp/{str(datetime.now())}")
-        EPOCHS = 1
+        args.epochs = 1
 
     dqn = DQN(**dqn_args)
-    for i in range(EPOCHS):
-        print(f"\n\nEpoch {i+1}/{EPOCHS}")
+    for i in range(args.epochs):
+        print(f"\n\nEpoch {i+1}/{args.epochs}")
         dqn.train_epoch()
     dqn.close_writer()
