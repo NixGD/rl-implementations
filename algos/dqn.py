@@ -124,7 +124,7 @@ class DQN():
                  epoch_steps=1e4, writer=None, buffer_size=10000,
                  device=None, evaluation_runs=2, batch_size=32,
                  state_sample_size=512, prefill_buffer_size=10000,
-                 sync_frequency=1000, save_models=True):
+                 sync_frequency=1000, save_models=True, run_name=None):
 
         if device is None:
             self.device = torch.device("cuda") if torch.cuda.is_available() \
@@ -134,10 +134,11 @@ class DQN():
 
         # writer never closes!
         self.run_time = str(datetime.now())
-        self.writer = SummaryWriter(f"runs/dqn/{self.run_time}") \
+        self.run_name = run_name if run_name is not None else "none"
+        self.writer = SummaryWriter(f"runs/dqn/{self.run_name}/{self.run_time}") \
             if writer is None else writer
 
-        print(f"Run time: {self.run_time}")
+        print(f"Run name: {self.run_name}, run time: {self.run_time}")
 
         self.env = gym.make('CartPole-v0') if env is None else env
         self.num_actions = self.env.action_space.n
@@ -352,6 +353,8 @@ if __name__ == '__main__':
                         help='Uses PongNoFrameskip-v4 as the enviroment')
     parser.add_argument('--epochs', type=int, default=50,
                         help='Number of epochs to run for')
+    parser.add_argument('--name', type=str, default=None,
+                        help='run-name')
     args = parser.parse_args()
 
     envname = 'PongNoFrameskip-v4' if args.no_skip else 'Pong-v0'
@@ -363,8 +366,11 @@ if __name__ == '__main__':
 
     dqn_args = {
         "env": wrapped,
-        "atari": True
+        "atari": True,
     }
+
+
+
 
     if args.disable_cuda:
         dqn_args["device"] = torch.device('cpu')
@@ -374,8 +380,11 @@ if __name__ == '__main__':
         dqn_args["evaluation_runs"] = 1
         dqn_args["prefill_buffer_size"] = 100
         dqn_args["save_models"] = False
-        dqn_args["writer"] = SummaryWriter(f"runs/tmp/{str(datetime.now())}")
+        dqn_args["run_name"] = "minimal"
         args.epochs = 1
+
+    if args.name is not None:
+        dqn_args["run_name"] = args.name
 
     dqn = DQN(**dqn_args)
     for i in range(args.epochs):
